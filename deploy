@@ -1,0 +1,320 @@
+#!/usr/bin/env python3
+
+import argparse
+import time
+import datetime
+import os
+import sys
+import subprocess
+import fnmatch
+import shutil
+
+import sqlite3
+
+currentTime = str(time.time())
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Deploy a site to the local www jail.'
+    )
+
+    parser.add_argument('--db', metavar='PATH', default='/srv/www/sites.db',
+                       help='the database site metadata is stored in')
+
+    subparsers = parser.add_subparsers(title='action', dest='action', metavar='ACTION')
+    subparsers.required = True
+
+    listParser = subparsers.add_parser('list', help='list all known sites')
+    listParser.set_defaults(action=list)
+
+    listParser.add_argument('--site', metavar='*', default='*',
+                            help='a glob-style pattern to filter site names')
+    listParser.add_argument('--remote', metavar='*', default='*',
+                            help='a glob-style pattern to filter remote URLs')
+
+    depsParser = subparsers.add_parser('deployments', help='list all deployments')
+    depsParser.set_defaults(action=deps)
+
+    depsParser.add_argument('--site', metavar='*', default='*',
+                            help='a glob-style pattern to filter site names')
+
+    addParser = subparsers.add_parser('add', help='add a site')
+    addParser.set_defaults(action=add)
+
+    deployParser = subparsers.add_parser('deploy', help='deploy one or more sites')
+    deployParser.set_defaults(action=deploy)
+
+    deployParser.add_argument('site', metavar='SITE',
+                             help='a site to deploy')
+
+    deployParser.add_argument('--basedir', metavar='DIR', default='/srv/www/sites',
+                             help='the directories the sites live in')
+
+    revertParser = subparsers.add_parser('revert', help='revert to a previous revision')
+    revertParser.set_defaults(action=revert)
+
+    revertParser.add_argument('site', metavar='SITE', nargs='?', default=None)
+    revertParser.add_argument('rev', metavar='REV', nargs='?', default=None)
+
+    args = parser.parse_args()
+
+    # Open the database.
+    connection = sqlite3.connect(args.db)
+    connection.row_factory = sqlite3.Row
+    db = connection.cursor()
+
+    args.action(db, args)
+
+    connection.commit()
+
+
+def get_info_by_name(db, name):
+    db.execute('SELECT sites.id, sites.remote '
+               + 'FROM sites '
+               + 'WHERE sites.name = ?;',
+               (name,))
+
+    siteInfo = db.fetchone()
+    if siteInfo is None:
+        raise Exception("Site {} is unknown".format(name))
+
+
+    return siteInfo['id'], siteInfo['remote']
+
+
+def list(db, args):
+    db.execute('SELECT name, remote FROM sites;')
+
+    sites = db.fetchall()
+
+    # For each column, find the longest string.
+    lengths = {'name': 4, 'remote': 6}
+    for site in sites:
+        for column in site.keys():
+            lengths[column] = max(lengths[column], len(site[column]))
+
+    print_site_listing(lengths, {'name': 'site', 'remote': 'remote'})
+
+    for site in sites:
+        if not (fnmatch.fnmatch(site['name'], args.site)
+                 and fnmatch.fnmatch(site['remote'], args.remote)):
+            continue
+
+        print_site_listing(lengths, site)
+
+
+def print_site_listing(lengths, site):
+    print("{:<{name_width}} | {:<{remote_width}}".format(
+        site['name'],
+        site['remote'],
+        name_width=lengths['name'],
+        remote_width=lengths['remote']
+    ))
+
+
+def deps(db, args):
+    db.execute('SELECT deployments.path, deployments.date, deployments.active, sites.name ' +
+                 'FROM deployments ' +
+                 'JOIN sites ON deployments.site = sites.id ' +
+                 'ORDER BY date ASC;')
+
+    dbDeployments = db.fetchall()
+    deployments = []
+
+    # Translate each timestamp into a date and calculate the required column widths.
+    lengths = {'path': 4, 'date': 4, 'active': 1, 'name': 4}
+    for dbDep in dbDeployments:
+        deployment = {}
+
+        for column in dbDep.keys():
+            deployment[column] = dbDep[column]
+
+        deployment['date'] = datetime.datetime.utcfromtimestamp(int(dbDep['date'])).isoformat()
+
+        for column in dbDep.keys():
+            if column == 'active':
+                continue
+
+            lengths[column] = max(lengths[column], len(deployment[column]))
+
+        deployments.append(deployment)
+
+    print_dep_listing(lengths, {
+        'active': True, 'name': 'site', 'path': 'path', 'date': 'date'}
+    )
+
+    for deployment in deployments:
+        if not fnmatch.fnmatch(deployment['name'], args.site):
+            continue
+
+        print_dep_listing(lengths, deployment)
+
+
+def print_dep_listing(lengths, dep):
+    print("{} | {:<{name_width}} | {:<{path_width}} | {:<{date_width}}".format(
+          ('*' if dep['active'] else ' '),
+          dep['name'],
+          dep['path'],
+          dep['date'],
+          name_width=lengths['name'],
+          path_width=lengths['path'],
+          date_width=lengths['date']))
+
+
+def add(db, args):
+    site_name = prompt_nonempty('Site name')
+    remote = prompt_default('Remote', 'git.cmpsb.net:cmpsb/' + site_name)
+
+    db.execute('INSERT INTO sites (name, remote) VALUES (?, ?);',
+               (site_name, remote))
+
+
+def prompt_default(prompt, default):
+    value = input(prompt + ' [' + default + ']: ')
+    if not value:
+        return default
+    else:
+        return value
+
+
+def prompt_nonempty(prompt):
+    value = input(prompt + ': ')
+    if not value:
+        return prompt_nonempty(prompt)
+    else:
+        return value
+
+
+def deploy(db, args):
+    site = args.site
+
+    siteId, repo = get_info_by_name(db, site)
+    siteDir = args.basedir + '/' + site
+
+    deployDir = siteDir + '/deployments/.' + currentTime
+
+    print("\033[32;1mDeploying " + site + ".\033[0m")
+
+    os.makedirs(deployDir, mode=0o755, exist_ok=True)
+
+    subprocess.run(['git', 'clone', repo, deployDir + '/'], check=True)
+    result = subprocess.run(['git', 'rev-parse', 'HEAD'],
+                            stdout=subprocess.PIPE, check=True, cwd=deployDir)
+    revId = result.stdout.decode('utf8').partition("\n")[0]
+
+    print("\033[32;1mFound revision " + revId + ".\033[0m")
+
+    db.execute('INSERT INTO deployments (site, path, revision, date, active) ' +
+                 'VALUES (?, ?, ?, ?, 0);',
+               (siteId, deployDir, revId, int(time.time())))
+
+    activate(db, args, siteId, site, revId)
+
+    clean(db, args)
+
+
+def activate(db, args, id, site, revision):
+    db.execute('UPDATE deployments SET active = 0 WHERE site = ?;', (id,))
+
+    siteDir = args.basedir + '/' + site
+    linkName = siteDir + '/current'
+
+    sharedPath = siteDir + '/shared'
+    sharedLinkName = linkName + '/htdocs/shared'
+
+    db.execute('SELECT path '
+               + 'FROM deployments '
+               + 'WHERE site = ? '
+               +   'AND revision = ?', (id, revision))
+
+    pathInfo = db.fetchone()
+    if pathInfo is None:
+        raise Exception('No revision {} for site {}'.format(revision, site))
+
+    path = pathInfo['path']
+
+    if os.path.islink(linkName):
+        subprocess.run(['rm', linkName])
+
+    subprocess.run(['ln', '-s', path, linkName], check=True)
+
+    if os.path.exists(sharedPath):
+        if os.path.islink(sharedLinkName):
+            subprocess.run(['rm', sharedLinkName])
+
+        subprocess.run(['ln', '-s', sharedPath, sharedLinkName], check=True)
+
+    db.execute('UPDATE deployments '
+               + 'SET active = 1 '
+               + 'WHERE revision = ?', (revision,))
+
+
+def revert(db, args):
+    site = args.site
+
+    if site is None:
+        db.execute('SELECT sites.id, sites.name '
+                   + 'FROM deployments '
+                   + 'JOIN sites ON sites.id = deployments.site '
+                   + 'ORDER BY deployments.id DESC '
+                   + 'LIMIT 1;')
+
+        siteInfo = db.fetchone()
+        site = siteInfo['name']
+        siteId = siteInfo['id']
+    else:
+        siteId, siteRepo = get_info_by_name(db, site)
+
+    rev = args.rev
+    if rev is None:
+        db.execute('SELECT revision '
+                   + 'FROM deployments '
+                   + 'WHERE site = ? '
+                   +   'AND active <> 1 '
+                   +   'AND present = 1 '
+                   + 'ORDER BY date DESC '
+                   + 'LIMIT 1', (siteId,))
+
+        revInfo = db.fetchone()
+        if revInfo is None:
+          raise Exception('No available previous deployment to revert to')
+
+        rev = revInfo['rev']
+
+    activate(db, args, siteId, site, rev)
+
+
+def clean(db, args):
+    site_name = args.site
+
+    db.connection.commit()
+    db.execute('SELECT deployments.id, deployments.path '
+               + 'FROM deployments '
+               + 'JOIN sites ON deployments.site = sites.id '
+               + 'WHERE sites.name = ? '
+               +   'AND deployments.active <> 1 '
+               +   'AND deployments.present = 1 '
+               + 'ORDER BY deployments.date DESC '
+               + 'LIMIT 1000000 OFFSET 4;', (site_name,))
+
+    results = db.fetchall()
+
+    for result in results:
+        print('\033[33;1mDeleting', result['path'], '\033[0m')
+
+        try:
+          shutil.rmtree(result['path'])
+        except:
+          pass
+
+        db.execute('UPDATE deployments '
+                   + 'SET present = 0 '
+                   + 'WHERE id = ?', (result['id'],))
+
+
+try:
+    main()
+except Exception:
+    print("\033[31;1m")
+    raise
