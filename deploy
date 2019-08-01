@@ -16,11 +16,11 @@ currentTime = str(time.time())
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Deploy a site to the local www jail.'
+        description='Manage website deployments'
     )
 
-    parser.add_argument('--db', metavar='PATH', default='/srv/www/sites.db',
-                       help='the database site metadata is stored in')
+    parser.add_argument('--basedir', metavar='PATH', default='/srv/www/sites',
+                        help='the directories the sites are stored in')
 
     subparsers = parser.add_subparsers(title='action', dest='action', metavar='ACTION')
     subparsers.required = True
@@ -48,9 +48,6 @@ def main():
     deployParser.add_argument('site', metavar='SITE',
                              help='a site to deploy')
 
-    deployParser.add_argument('--basedir', metavar='DIR', default='/srv/www/sites',
-                             help='the directories the sites live in')
-
     revertParser = subparsers.add_parser('revert', help='revert to a previous revision')
     revertParser.set_defaults(action=revert)
 
@@ -59,38 +56,76 @@ def main():
 
     args = parser.parse_args()
 
-    # Open the database.
-    connection = sqlite3.connect(args.db)
-    connection.row_factory = sqlite3.Row
-    db = connection.cursor()
+    if not os.path.isdir(args.basedir):
+        raise FileNotFoundError(args.basedir)
 
-    args.action(db, args)
+    args.action(args)
 
-    connection.commit()
+
+def init_db(db):
+    db.executescript("""
+CREATE TABLE IF NOT EXISTS site (
+    name TEXT PRIMARY KEY NOT NULL,
+    remote TEXT NOT NULL,
+    env TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS deployment (
+    id INTEGER PRIMARY KEY NOT NULL,
+    path TEXT NOT NULL,
+    revision TEXT NOT NULL,
+    date INTEGER NOT NULL,
+    active INTEGER NOT NULL,
+    present INTEGER NOT NULL DEFAULT 1
+);
+""")
+
+
+def get_site_db(basedir, name):
+    return os.path.join(basedir, name, 'site.db')
+
+def open_site_db(basedir, name):
+    db_path = get_site_db(basedir, name)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
 def get_info_by_name(db, name):
-    db.execute('SELECT sites.id, sites.remote '
-               + 'FROM sites '
-               + 'WHERE sites.name = ?;',
-               (name,))
+    db.execute('SELECT site.remote FROM site WHERE site.name = ?;', (name,))
 
     siteInfo = db.fetchone()
     if siteInfo is None:
         raise Exception("Site {} is unknown".format(name))
 
-
     return siteInfo['id'], siteInfo['remote']
 
 
-def list(db, args):
-    db.execute('SELECT name, remote FROM sites;')
+def accessible_sites(basedir):
+    for ent in os.scandir(basedir):
+        ent_db = get_site_db(basedir, ent.name)
+        if os.access(ent_db, os.R_OK | os.W_OK):
+            conn = sqlite3.connect(ent_db)
+            conn.row_factory = sqlite3.Row
+            db = conn.cursor()
 
-    sites = db.fetchall()
+            db.execute('SELECT name, remote FROM site;')
+
+            yield db.fetchone()
+
+            conn.close()
+
+
+def list(args):
+    sites = [*accessible_sites(args.basedir)]
 
     # For each column, find the longest string.
     lengths = {'name': 4, 'remote': 6}
     for site in sites:
+        if not (fnmatch.fnmatch(site['name'], args.site)
+                 and fnmatch.fnmatch(site['remote'], args.remote)):
+            continue
+
         for column in site.keys():
             lengths[column] = max(lengths[column], len(site[column]))
 
@@ -113,7 +148,10 @@ def print_site_listing(lengths, site):
     ))
 
 
-def deps(db, args):
+def deps(args):
+    conn = open_site_db(args.basedir, args.site)
+    db = conn.cursor()
+
     db.execute('SELECT deployments.path, deployments.date, deployments.active, sites.name ' +
                  'FROM deployments ' +
                  'JOIN sites ON deployments.site = sites.id ' +
@@ -150,6 +188,8 @@ def deps(db, args):
 
         print_dep_listing(lengths, deployment)
 
+    conn.close()
+
 
 def print_dep_listing(lengths, dep):
     print("{} | {:<{name_width}} | {:<{path_width}} | {:<{date_width}}".format(
@@ -162,12 +202,22 @@ def print_dep_listing(lengths, dep):
           date_width=lengths['date']))
 
 
-def add(db, args):
+def add(args):
     site_name = prompt_nonempty('Site name')
-    remote = prompt_default('Remote', 'git.cmpsb.net:cmpsb/' + site_name)
+    remote = prompt_default('Remote', 'git.wukl.net:wukl/' + site_name)
+    config = prompt_default('DTAP Environment', 'P')
 
-    db.execute('INSERT INTO sites (name, remote) VALUES (?, ?);',
-               (site_name, remote))
+    site_dir = os.path.join(args.basedir, site_name)
+    os.makedirs(site_dir, mode=0o0775, exist_ok=True)
+
+    conn = open_site_db(args.basedir, site_name)
+    db = conn.cursor()
+
+    init_db(db)
+    db.execute('INSERT INTO site (name, remote, env) VALUES (?, ?, ?)', (site_name, remote, config))
+
+    conn.commit()
+    conn.close()
 
 
 def prompt_default(prompt, default):
@@ -180,14 +230,17 @@ def prompt_default(prompt, default):
 
 def prompt_nonempty(prompt):
     value = input(prompt + ': ')
-    if not value:
-        return prompt_nonempty(prompt)
-    else:
+    if value:
         return value
 
+    return prompt_nonempty(prompt)
 
-def deploy(db, args):
+
+def deploy(args):
     site = args.site
+
+    conn = open_site_db(args.basedir, site)
+    db = conn.cursor()
 
     siteId, repo = get_info_by_name(db, site)
     siteDir = args.basedir + '/' + site
@@ -205,17 +258,22 @@ def deploy(db, args):
 
     print("\033[32;1mFound revision " + revId + ".\033[0m")
 
-    db.execute('INSERT INTO deployments (site, path, revision, date, active) ' +
-                 'VALUES (?, ?, ?, ?, 0);',
+    db.execute('INSERT INTO deployment (path, revision, date, active) VALUES (?, ?, ?, 0);',
                (siteId, deployDir, revId, int(time.time())))
 
-    activate(db, args, siteId, site, revId)
+    conn.commit()
+    conn.close()
 
-    clean(db, args)
+    activate(args, siteId, site, revId)
+
+    clean(args)
 
 
-def activate(db, args, id, site, revision):
-    db.execute('UPDATE deployments SET active = 0 WHERE site = ?;', (id,))
+def activate(args, id, site, revision):
+    conn = open_site_db(args.basedir, site)
+    db = conn.cursor()
+
+    db.execute('UPDATE deployment SET active = 0;', (id,))
 
     siteDir = args.basedir + '/' + site
     linkName = siteDir + '/current'
@@ -249,9 +307,15 @@ def activate(db, args, id, site, revision):
                + 'SET active = 1 '
                + 'WHERE revision = ?', (revision,))
 
+    conn.commit()
+    conn.close()
 
-def revert(db, args):
+
+def revert(args):
     site = args.site
+
+    conn = open_site_db(args.basedir, site)
+    db = conn.cursor()
 
     if site is None:
         db.execute('SELECT sites.id, sites.name '
@@ -282,11 +346,17 @@ def revert(db, args):
 
         rev = revInfo['rev']
 
-    activate(db, args, siteId, site, rev)
+    activate(args, siteId, site, rev)
+
+    conn.commit()
+    conn.close()
 
 
-def clean(db, args):
+def clean(args):
     site_name = args.site
+
+    conn = open_site_db(args.basedir, site_name)
+    db = conn.cursor()
 
     db.connection.commit()
     db.execute('SELECT deployments.id, deployments.path '
@@ -311,6 +381,9 @@ def clean(db, args):
         db.execute('UPDATE deployments '
                    + 'SET present = 0 '
                    + 'WHERE id = ?', (result['id'],))
+
+    conn.commit()
+    conn.close()
 
 
 try:
