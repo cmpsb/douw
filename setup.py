@@ -2,7 +2,7 @@
 from setuptools import setup, find_packages
 
 try:
-    long_description = open("README.rst").read()
+    long_description = open("README.rst.rst").read()
 except IOError:
     long_description = ""
 
@@ -13,9 +13,11 @@ setup(
     url='https://git.wukl.net/wukl/douw',
     license="MIT",
     author="Luc Everse",
+    author_email='luc@wukl.net',
     packages=find_packages(),
     install_requires=[],
     long_description=long_description,
+    long_description_content_type='text/x-rst',
     scripts=['bin/douw'],
     classifiers=[
         "Programming Language :: Python",
