@@ -7,14 +7,16 @@ except IOError:
     long_description = ""
 
 setup(
-    name="deploy",
+    name="douw",
     version="0.1.0",
     description="Drop-in website deployment",
+    url='https://git.wukl.net/wukl/douw',
     license="MIT",
     author="Luc Everse",
     packages=find_packages(),
     install_requires=[],
     long_description=long_description,
+    scripts=['bin/douw'],
     classifiers=[
         "Programming Language :: Python",
         "Programming Language :: Python :: 3.7",

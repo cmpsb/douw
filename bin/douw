@@ -1,0 +1,9 @@
+#!/usr/bin/env python3
+
+from douw import douw
+
+try:
+    douw.main()
+except Exception:
+    print("\033[31;1m")
+    raise

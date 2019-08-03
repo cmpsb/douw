@@ -4,16 +4,17 @@ import argparse
 import time
 import datetime
 import os
-import sys
 import subprocess
 import fnmatch
 import shutil
 
 import sqlite3
 
+from douw.site import Site
+
 currentTime = str(time.time())
 
-assume_defaults = False
+assume_yes = False
 
 
 def main():
@@ -31,7 +32,6 @@ def main():
                         help='assume defaults instead of prompting or abort if no sane default can be guessed')
 
     subparsers = parser.add_subparsers(title='action', dest='action', metavar='ACTION')
-    subparsers.required = True
 
     listParser = subparsers.add_parser('list', help='list all known sites')
     listParser.set_defaults(action=list)
@@ -68,18 +68,45 @@ def main():
     revertParser.add_argument('site', metavar='SITE', nargs='?', default=None)
     revertParser.add_argument('rev', metavar='REV', nargs='?', default=None)
 
+    cleanParser = subparsers.add_parser('clean', help='remove old deployments')
+    cleanParser.set_defaults(action=clean)
+
+    cleanParser.add_argument('site', metavar='SITE', help='the site to clean')
+
+    helpParser = subparsers.add_parser('help', help='show this help message and exit')
+    helpParser.add_argument('haction', metavar='ACTION', help='the action to get help for')
+    helpParser.set_defaults(action=lambda a:
+        (parser if a.haction is None else subparsers.choices[a.haction]).print_help()
+    )
+
+    removeParser = subparsers.add_parser('remove', help='remove a site')
+    removeParser.set_defaults(action=remove)
+    removeParser.add_argument('site', metavar='SITE')
+
     args = parser.parse_args()
 
-    global assume_defaults
-    assume_defaults = args.assume_defaults
+    global assume_yes
+    assume_yes = args.assume_defaults
 
     if not os.path.isdir(args.basedir):
         raise FileNotFoundError(args.basedir)
+
+    if args.action is None:
+        parser.print_help()
+        return
 
     args.action(args)
 
 
 def init_db(db):
+    """
+    Initializes the given database for use.
+
+    This creates the base schema and applies migrations if necessary.
+
+    :param db: the database to initialize
+    """
+
     db.executescript("""
 CREATE TABLE IF NOT EXISTS site (
     name TEXT PRIMARY KEY NOT NULL,
@@ -105,11 +132,42 @@ CREATE TABLE IF NOT EXISTS deployment (
 
     db.execute('PRAGMA user_version = 1')
 
+
 def get_site_db(basedir, name):
+    """
+    Returns the path to the database for the given site.
+
+    :param basedir: the directory all sites are stored in
+    :param name:  the name of the site
+    :return: the path to the database
+    """
     return os.path.join(basedir, name, 'site.db')
 
-def open_site_db(basedir, name):
+
+def open_site_db(basedir, name, must_exist=True):
+    """
+    Opens a connection to a site's database.
+
+    The database is checked for existence and R/W rights if the database is assumed to exist.
+    If the database is missing or cannot be modified, an error is raised (if must_exist is True) or the database is
+    created and initialized (if must_exist is False).
+
+    Upon successfully opening the database migrations are applied transparently.
+
+    :param basedir: the directory all sites are stored in
+    :param name: the name of the site
+    :param must_exist: iff True, the file is checked for existence before attempting to open the database
+
+    :return: a connection to the site's database
+    """
     db_path = get_site_db(basedir, name)
+
+    if must_exist and not os.access(db_path, os.F_OK):
+        raise FileNotFoundError('The requested site could not be found at {}'.format(os.path.join(basedir, name)))
+
+    if must_exist and not os.access(db_path, os.W_OK | os.R_OK):
+        raise PermissionError('You do not have the permission to access {}'.format(os.path.join(basedir, name)))
+
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
 
@@ -122,14 +180,19 @@ def open_site_db(basedir, name):
 
 
 def get_site_info(db):
-    db.execute('SELECT site.remote, site.env, site.default_treeish FROM site;')
+    db.execute('SELECT site.name, site.remote, site.env, site.default_treeish FROM site;')
 
     site_info = db.fetchone()
 
-    return site_info['remote'], site_info['env'], site_info['default_treeish']
+    return Site(site_info['name'], site_info['remote'], site_info['env'], site_info['default_treeish'])
 
 
 def accessible_sites(basedir):
+    """
+    A generator yielding all sites accessible by the current user.
+
+    :param basedir: the directory all sites are stored in
+    """
     for ent in os.scandir(basedir):
         ent_db = get_site_db(basedir, ent.name)
         if os.access(ent_db, os.R_OK | os.W_OK):
@@ -237,17 +300,27 @@ def print_dep_listing(lengths, dep):
 
 def add(args):
     site_name = args.name or prompt_nonempty('Site name')
+    site_dir = os.path.join(args.basedir, site_name)
+
+    if os.access(get_site_db(args.basedir, site_name), os.F_OK):
+        print('\033[31;1mA site named {} already exists at {}\033[0m'.format(site_name, site_dir))
+        if args.force_dangerous:
+            setattr(args, 'site', site_name)
+            remove(args)
+            if os.access(get_site_db(args.basedir, site_name), os.F_OK):
+                return
+        else:
+            return
+
     remote = args.remote or prompt_default('Remote', 'git.wukl.net:wukl/' + site_name)
-    branch = args.branch or prompt_default('Branch', 'master')
+    branch = args.branch or prompt_default('Branch (leave empty to use repository default)', None)
     env = args.env or prompt_default('DTAP Environment', 'P')
 
-    site_dir = os.path.join(args.basedir, site_name)
     os.makedirs(site_dir, mode=0o0775, exist_ok=True)
 
-    conn = open_site_db(args.basedir, site_name)
+    conn = open_site_db(args.basedir, site_name, must_exist=False)
     db = conn.cursor()
 
-    init_db(db)
     db.execute('INSERT INTO site (name, remote, env, default_treeish) VALUES (?, ?, ?, ?)',
                (site_name, remote, env, branch))
 
@@ -256,11 +329,11 @@ def add(args):
 
 
 def prompt_default(prompt, default):
-    global assume_defaults
-    if assume_defaults:
+    global assume_yes
+    if assume_yes:
         return default
 
-    value = input(prompt + ' [' + default + ']: ')
+    value = input(prompt + ' [' + (default if default is not None else '') + ']: ')
     if not value:
         return default
     else:
@@ -268,8 +341,8 @@ def prompt_default(prompt, default):
 
 
 def prompt_nonempty(prompt):
-    global assume_defaults
-    if assume_defaults:
+    global assume_yes
+    if assume_yes:
         raise Exception('Missing required value "{}"'.format(prompt))
 
     value = input(prompt + ': ')
@@ -277,6 +350,20 @@ def prompt_nonempty(prompt):
         return value
 
     return prompt_nonempty(prompt)
+
+
+def prompt_bool(prompt):
+    global assume_yes
+    if assume_yes:
+        return True
+
+    value = input(prompt + ' [N/y]: ')
+    if not value:
+        return False
+
+    vlower = value.lower()
+
+    return vlower == 'y' or vlower == 'yes'
 
 
 def deploy(args):
@@ -298,7 +385,7 @@ def deploy(args):
     conn = open_site_db(args.basedir, site)
     db = conn.cursor()
 
-    repo, env, default_branch = get_site_info(db)
+    site_info = get_site_info(db)
     site_dir = os.path.join(args.basedir, site)
 
     deploy_dir = os.path.join(site_dir, 'deployments', currentTime)
@@ -307,8 +394,8 @@ def deploy(args):
 
     os.makedirs(deploy_dir, mode=0o755, exist_ok=True)
 
-    subprocess.run(['git', 'clone', repo, deploy_dir + '/'], check=True)
-    branch = args.treeish or default_branch
+    subprocess.run(['git', 'clone', site_info.remote, deploy_dir + '/'], check=True)
+    branch = args.treeish or site_info.default_treeish
     if branch is not None:
         subprocess.run(['git', '-C', deploy_dir, 'checkout', branch], check=True)
     result = subprocess.run(['git', 'rev-parse', 'HEAD'],
@@ -454,8 +541,24 @@ def clean(args):
     conn.close()
 
 
-try:
-    main()
-except Exception:
-    print("\033[31;1m")
-    raise
+def remove(args):
+    site_name = args.site
+
+    # Check for administrative access
+    if not os.access(args.basedir, os.W_OK):
+        raise PermissionError(
+            'Administrative access (i.e., write access to the base directory) is required for deleting sites'
+        )
+
+    # Ensure that the database exists and is accessible
+    conn = open_site_db(args.basedir, site_name)
+    conn.close()
+
+    site_dir = os.path.join(args.basedir, site_name)
+
+    confirmed = prompt_bool('Are you sure you want to delete site {} at {}?'.format(site_name, site_dir))
+    if not confirmed:
+        print('\033[31;1mAborted\033[0m')
+        return
+
+    shutil.rmtree(site_dir)
