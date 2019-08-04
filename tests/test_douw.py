@@ -3,13 +3,13 @@ import os
 from douw import douw
 
 
-def test_help():
-    sys.argv = ['douw', 'help']
+def test_help(tmpdir):
+    sys.argv = ['douw', '--basedir', str(tmpdir), 'help']
     douw.main()
 
 
-def test_help_for_action():
-    sys.argv = ['douw', 'help', 'add']
+def test_help_for_action(tmpdir):
+    sys.argv = ['douw', '--basedir', str(tmpdir), 'help', 'add']
     douw.main()
 
 
