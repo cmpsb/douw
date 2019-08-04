@@ -88,12 +88,12 @@ def main():
     global assume_yes
     assume_yes = args.assume_defaults
 
-    if not os.path.isdir(args.basedir):
-        raise FileNotFoundError(args.basedir)
-
     if args.action is None:
         parser.print_help()
         return
+
+    if not os.path.isdir(args.basedir):
+        raise FileNotFoundError(args.basedir)
 
     args.action(args)
 
