@@ -74,7 +74,7 @@ def main():
     cleanParser.add_argument('site', metavar='SITE', help='the site to clean')
 
     helpParser = subparsers.add_parser('help', help='show this help message and exit')
-    helpParser.add_argument('haction', metavar='ACTION', help='the action to get help for')
+    helpParser.add_argument('haction', metavar='ACTION', help='the action to get help for', nargs='?')
     helpParser.set_defaults(action=lambda a:
         (parser if a.haction is None else subparsers.choices[a.haction]).print_help()
     )
