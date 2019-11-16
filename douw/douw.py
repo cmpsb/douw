@@ -614,7 +614,7 @@ def run_script(db, deployment_path, site_name, environment, commit, stage):
     global args
 
     env = dict(os.environ) if args.inherit_env else {}
-    env.update([(var['name'], var['value']) for var in get_args(db)])
+    env.update([(var['name'], var['value']) for var in get_vars(db)])
     env.update({
         'DOUW_SITE_NAME': site_name,
         'DOUW_ENVIRONMENT': environment,
@@ -641,7 +641,7 @@ def var(args):
     conn.close()
 
 
-def get_args(db):
+def get_vars(db):
     db.execute("SELECT variable.name, variable.value FROM variable ORDER BY variable.name")
     return [{'name': res['name'], 'value': res['value']} for res in db.fetchall()]
 
@@ -656,7 +656,7 @@ def print_var_listing(lengths, var):
 
 
 def list_vars(db):
-    results = get_args(db)
+    results = get_vars(db)
 
     lengths = {'name': 4, 'value': 5}
 
