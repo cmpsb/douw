@@ -8,7 +8,7 @@ except IOError:
 
 setup(
     name="douw",
-    version="0.1.0",
+    version="0.2.0",
     description="Drop-in website deployment",
     url='https://git.wukl.net/wukl/douw',
     license="MIT",
