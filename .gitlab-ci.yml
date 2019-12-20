@@ -1,0 +1,7 @@
+image: python:3.7-buster
+
+test:
+  script:
+    - pip3 install pytest
+    - pip3 install -e .
+    - pytest

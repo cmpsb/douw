@@ -23,13 +23,18 @@ def main():
     )
 
     parser.add_argument('--basedir', metavar='PATH', default='/srv/www/sites',
-                        help='the directories the sites are stored in')
+                        help='set the directories the sites are stored in')
 
     parser.add_argument('--force-useless', action='store_true', help='force operations even if they are useless')
     parser.add_argument('--force-dangerous', action='store_true', help='force operations even if they are dangerous')
 
     parser.add_argument('--assume-defaults', '-y', action='store_true',
-                        help='assume defaults instead of prompting or abort if no sane default can be guessed')
+                        help='assume defaults instead of prompting, or abort if no sane default can be guessed')
+
+    parser.add_argument('--no-inherit-env', dest='inherit_env', action='store_false',
+                        help='do not forward environment variables to hook scripts')
+    parser.add_argument('--env', '-e', dest='env', metavar='[stage:]key[=value]', nargs='+', action='append',
+                        help='define additional environment variables for hook scripts')
 
     subparsers = parser.add_subparsers(title='action', dest='action', metavar='ACTION')
 
@@ -74,7 +79,7 @@ def main():
     cleanParser.add_argument('site', metavar='SITE', help='the site to clean')
 
     helpParser = subparsers.add_parser('help', help='show this help message and exit')
-    helpParser.add_argument('haction', metavar='ACTION', help='the action to get help for')
+    helpParser.add_argument('haction', metavar='ACTION', help='the action to get help for', nargs='?')
     helpParser.set_defaults(action=lambda a:
         (parser if a.haction is None else subparsers.choices[a.haction]).print_help()
     )
@@ -83,17 +88,23 @@ def main():
     removeParser.set_defaults(action=remove)
     removeParser.add_argument('site', metavar='SITE')
 
+    varParser = subparsers.add_parser('var', help='manage variables')
+    varParser.set_defaults(action=var)
+    varParser.add_argument('site', metavar='SITE', help='the site to manage the variables of')
+    varParser.add_argument('var', metavar='NAME[=VALUE]', help='the value to get or set', nargs='?')
+
+    global args
     args = parser.parse_args()
 
     global assume_yes
     assume_yes = args.assume_defaults
 
-    if not os.path.isdir(args.basedir):
-        raise FileNotFoundError(args.basedir)
-
     if args.action is None:
         parser.print_help()
         return
+
+    if not os.path.isdir(args.basedir):
+        raise FileNotFoundError(args.basedir)
 
     args.action(args)
 
@@ -122,6 +133,12 @@ CREATE TABLE IF NOT EXISTS deployment (
     active INTEGER NOT NULL,
     present INTEGER NOT NULL DEFAULT 1
 );
+
+CREATE TABLE IF NOT EXISTS variable (
+    id INTEGER PRIMARY KEY NOT NULL,
+    name TEXT NOT NULL UNIQUE ON CONFLICT REPLACE,
+    value TEXT NOT NULL
+)
 """)
 
     db.execute('PRAGMA user_version')
@@ -181,10 +198,15 @@ def open_site_db(basedir, name, must_exist=True):
 
 def get_site_info(db):
     db.execute('SELECT site.name, site.remote, site.env, site.default_treeish FROM site;')
-
     site_info = db.fetchone()
 
-    return Site(site_info['name'], site_info['remote'], site_info['env'], site_info['default_treeish'])
+    db.execute('SELECT revision, path FROM deployment WHERE active = 1;')
+    rev_info = db.fetchone() or {'revision': None, 'path': None}
+
+    return Site(
+        site_info['name'], site_info['remote'], site_info['env'], site_info['default_treeish'],
+        rev_info['revision'], rev_info['path']
+    )
 
 
 def accessible_sites(basedir):
@@ -380,17 +402,17 @@ def deploy(args):
     :param args: the command line arguments
     :return: nothing
     """
-    site = args.site
+    site_name = args.site
 
-    conn = open_site_db(args.basedir, site)
+    conn = open_site_db(args.basedir, site_name)
     db = conn.cursor()
 
     site_info = get_site_info(db)
-    site_dir = os.path.join(args.basedir, site)
+    site_dir = os.path.join(args.basedir, site_name)
 
     deploy_dir = os.path.join(site_dir, 'deployments', currentTime)
 
-    print("\033[32;1mDeploying " + site + ".\033[0m")
+    print("\033[32;1mDeploying " + site_name + ".\033[0m")
 
     os.makedirs(deploy_dir, mode=0o755, exist_ok=True)
 
@@ -411,11 +433,14 @@ def deploy(args):
 
         if args.revert:
             print('\033[33;1mReverting to previous deployment\033[0m')
-            activate(args, site, rev_id)
+            activate(args, site_name, rev_id)
 
         return
 
     print("\033[32;1mFound revision " + rev_id + ".\033[0m")
+
+    # Execute post-clone
+    run_script(db, deploy_dir, site_info.name, site_info.env, rev_id, 'post-clone')
 
     db.execute('INSERT INTO deployment (path, revision, date, active) VALUES (?, ?, ?, 0);',
                (deploy_dir, rev_id, int(time.time())))
@@ -423,12 +448,12 @@ def deploy(args):
     conn.commit()
     conn.close()
 
-    activate(args, site, rev_id)
+    activate(args, site_info, rev_id)
 
     clean(args)
 
 
-def activate(args, site, revision):
+def activate(args, site_info, revision):
     """
     Activates an existing deployment.
 
@@ -440,12 +465,11 @@ def activate(args, site, revision):
     :param revision: the revision ID indicating the deployment to activate
     :return:
     """
-    conn = open_site_db(args.basedir, site)
+    site_name = site_info.name
+    conn = open_site_db(args.basedir, site_name)
     db = conn.cursor()
 
-    db.execute('UPDATE deployment SET active = 0;')
-
-    site_dir = os.path.join(args.basedir, site)
+    site_dir = os.path.join(args.basedir, site_name)
     link_name = os.path.join(site_dir, 'current')
     new_link_name = link_name + '.new'
 
@@ -453,18 +477,20 @@ def activate(args, site, revision):
     db.execute('SELECT path FROM deployment WHERE revision = ? AND present = 1 ORDER BY date DESC LIMIT 1', (revision,))
     path_info = db.fetchone()
     if path_info is None:
-        raise Exception('No available deployment for revision {} for site {}'.format(revision, site))
+        raise Exception('No available deployment for revision {} for site {}'.format(revision, site_name))
 
-    path = path_info['path']
-    if not os.path.exists(path):
-        db.execute('UPDATE deployment SET present = 0 WHERE path = ?', (path,))
+    # Check that the directory actually exists
+    new_path = path_info['path']
+    old_path = site_info.cur_path
+    if not os.path.exists(new_path):
+        db.execute('UPDATE deployment SET present = 0 WHERE path = ?', (new_path,))
         conn.commit()
         conn.close()
         raise Exception('The selected revision ({}) has been removed'.format(revision))
 
     # Determine the location for the shared data
     shared_dir = os.path.join(site_dir, 'shared')
-    shared_link_name = os.path.join(path, 'shared')
+    shared_link_name = os.path.join(new_path, 'shared')
     new_shared_link_name = shared_link_name + '.new'
 
     # Switch the symlink to shared data, if the folder is present
@@ -472,16 +498,25 @@ def activate(args, site, revision):
         os.symlink(shared_dir, new_shared_link_name, target_is_directory=True)
         os.replace(new_shared_link_name, shared_link_name)
 
+    # Execute pre-deactivate, pre-activate
+    run_script(db, old_path, site_info.name, site_info.env, revision, 'pre-deactivate')
+    run_script(db, new_path, site_info.name, site_info.env, site_info.cur_rev, 'pre-activate')
+
     # Switch the symlink
-    os.symlink(path, new_link_name, target_is_directory=True)
+    os.symlink(new_path, new_link_name, target_is_directory=True)
     os.replace(new_link_name, link_name)
 
     # Register the new deployment
+    db.execute('UPDATE deployment SET active = 0;')
     db.execute("""
         UPDATE deployment 
           SET active = 1 
           WHERE rowid = (SELECT rowid FROM deployment WHERE revision = ? ORDER BY date DESC LIMIT 1);
     """, (revision,))
+
+    # Execute post-deactivate, post-activate
+    run_script(db, old_path, site_info.name, site_info.env, site_info.cur_rev, 'post-deactivate')
+    run_script(db, new_path, site_info.name, site_info.env, revision, 'post-activate')
 
     conn.commit()
     conn.close()
@@ -515,9 +550,11 @@ def clean(args):
     conn = open_site_db(args.basedir, site_name)
     db = conn.cursor()
 
+    site_info = get_site_info(db)
+
     db.connection.commit()
     db.execute("""
-        SELECT deployment.id, deployment.path 
+        SELECT deployment.id, deployment.path, deployment.revision
           FROM deployment 
           WHERE deployment.active <> 1 
             AND deployment.present = 1 
@@ -530,10 +567,12 @@ def clean(args):
     for result in results:
         print('\033[33;1mDeleting', result['path'], '\033[0m')
 
+        run_script(db, result['path'], site_info.name, site_info.env, result['revision'], 'pre-remove')
+
         try:
-          shutil.rmtree(result['path'])
+            shutil.rmtree(result['path'])
         except:
-          pass
+            pass
 
         db.execute('UPDATE deployment SET present = 0 WHERE id = ?', (result['id'],))
 
@@ -562,3 +601,81 @@ def remove(args):
         return
 
     shutil.rmtree(site_dir)
+
+
+def run_script(db, deployment_path, site_name, environment, commit, stage):
+    if deployment_path is None:
+        return
+
+    script_path = os.path.join(deployment_path, 'deploy', stage)
+    if not os.path.exists(script_path):
+        return
+
+    global args
+
+    env = dict(os.environ) if args.inherit_env else {}
+    env.update([(var['name'], var['value']) for var in get_vars(db)])
+    env.update({
+        'DOUW_SITE_NAME': site_name,
+        'DOUW_ENVIRONMENT': environment,
+        'DOUW_REVISION': commit,
+        'DOUW_STAGE': stage
+    })
+
+    subprocess.run([script_path], env=env, cwd=deployment_path, check=True)
+
+
+def var(args):
+    conn = open_site_db(args.basedir, args.site)
+    db = conn.cursor()
+
+    if args.var is None:
+        list_vars(db)
+    elif '=' in args.var:
+        name, value = args.var.split('=', maxsplit=1)
+        set_var(db, name, value)
+        conn.commit()
+    else:
+        get_var(db, args.var)
+
+    conn.close()
+
+
+def get_vars(db):
+    db.execute("SELECT variable.name, variable.value FROM variable ORDER BY variable.name")
+    return [{'name': res['name'], 'value': res['value']} for res in db.fetchall()]
+
+
+def print_var_listing(lengths, var):
+    print("{:<{name_width}} | {:<{value_width}}".format(
+        var['name'],
+        var['value'],
+        name_width=lengths['name'],
+        value_width=lengths['value'],
+    ))
+
+
+def list_vars(db):
+    results = get_vars(db)
+
+    lengths = {'name': 4, 'value': 5}
+
+    for var in results:
+        for col in var.keys():
+            lengths[col] = max(lengths[col], len(var[col] or ''))
+
+    print_var_listing(lengths, {'name': 'name', 'value': 'value'})
+
+    for var in results:
+        print_var_listing(lengths, var)
+
+
+def set_var(db, name, value):
+    db.execute('INSERT INTO variable (name, value) VALUES (?, ?);', (name, value))
+
+
+def get_var(db, name):
+    db.execute('SELECT variable.value FROM variable WHERE variable.name = ?', (name,))
+    var = db.fetchone()
+
+    print(name, '=', var['value'], sep='')
