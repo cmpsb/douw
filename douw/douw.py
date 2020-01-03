@@ -17,7 +17,7 @@ currentTime = str(time.time())
 assume_yes = False
 
 
-def main():
+def create_root_arg_parser():
     parser = argparse.ArgumentParser(
         description='Manage website deployments'
     )
@@ -36,29 +36,69 @@ def main():
     parser.add_argument('--env', '-e', dest='env', metavar='[stage:]key[=value]', nargs='+', action='append',
                         help='define additional environment variables for hook scripts')
 
+    return parser
+
+
+def create_arg_parser():
+    parser = create_root_arg_parser()
+
     subparsers = parser.add_subparsers(title='action', dest='action', metavar='ACTION')
 
-    listParser = subparsers.add_parser('list', help='list all known sites')
-    listParser.set_defaults(action=list)
+    create_list_parser(subparsers)
+    create_deps_parser(subparsers)
+    create_add_parser(subparsers)
+    create_edit_parser(subparsers)
+    create_deploy_parser(subparsers)
+    create_revert_parser(subparsers)
+    create_clean_parser(subparsers)
+    create_help_parser(parser, subparsers)
+    create_remove_parser(subparsers)
+    create_var_parser(subparsers)
 
-    listParser.add_argument('--site', metavar='*', default='*', help='a glob-style pattern to filter site names')
-    listParser.add_argument('--remote', metavar='*', default='*', help='a glob-style pattern to filter remote URLs')
+    return parser
 
-    depsParser = subparsers.add_parser('deployments', help='list all deployments')
-    depsParser.set_defaults(action=deps)
 
-    depsParser.add_argument('site', metavar='SITE', help='the site to get deployments for')
-    depsParser.add_argument('--deleted', action='store_true', help='Also show deleted deployments')
+def create_list_parser(subparsers):
+    list_parser = subparsers.add_parser('list', help='list all known sites')
+    list_parser.set_defaults(action=list)
 
-    addParser = subparsers.add_parser('add', help='add a site',
-                                      description='Missing properties are prompted from standard input.')
-    addParser.set_defaults(action=add)
+    list_parser.add_argument('--site', metavar='*', default='*', help='a glob-style pattern to filter site names')
+    list_parser.add_argument('--remote', metavar='*', default='*', help='a glob-style pattern to filter remote URLs')
 
-    addParser.add_argument('--name', metavar='NAME', help='the name of the site')
-    addParser.add_argument('--remote', metavar='URL', help='the repository to pull changes from')
-    addParser.add_argument('--branch', metavar='TREE-ISH', help='the branch (or tag or commit) to clone by default')
-    addParser.add_argument('--env', metavar='ENV', help='the DTAP environment to deploy as')
 
+def create_deps_parser(subparsers):
+    deps_parser = subparsers.add_parser('deployments', help='list all deployments')
+    deps_parser.set_defaults(action=deps)
+
+    deps_parser.add_argument('site', metavar='SITE', help='the site to get deployments for')
+    deps_parser.add_argument('--deleted', action='store_true', help='Also show deleted deployments')
+
+
+def create_add_parser(subparsers):
+    add_parser = subparsers.add_parser('add', help='add a site',
+                                       description='Missing properties are prompted from standard input.')
+    add_parser.set_defaults(action=add)
+
+    populate_add_edit_parser(add_parser)
+
+
+def create_edit_parser(subparsers):
+    edit_parser = subparsers.add_parser('edit', help='edit a site', description='modify site properties')
+    edit_parser.set_defaults(action=edit)
+
+    edit_parser.add_argument('site', metavar='SITE', help='the site to edit')
+
+    populate_add_edit_parser(edit_parser)
+
+
+def populate_add_edit_parser(subparser):
+    subparser.add_argument('--name', metavar='NAME', help='the name of the site')
+    subparser.add_argument('--remote', metavar='URL', help='the repository to pull changes from')
+    subparser.add_argument('--branch', metavar='TREE-ISH', help='the branch (or tag or commit) to clone by default')
+    subparser.add_argument('--env', metavar='ENV', help='the DTAP environment to deploy as')
+
+
+def create_deploy_parser(subparsers):
     deployParser = subparsers.add_parser('deploy', help='deploy one or more sites')
     deployParser.set_defaults(action=deploy)
 
@@ -67,31 +107,45 @@ def main():
 
     deployParser.add_argument('--revert', action='store_true', help='revert if the revision already exists')
 
+
+def create_revert_parser(subparsers):
     revertParser = subparsers.add_parser('revert', help='revert to a previous revision')
     revertParser.set_defaults(action=revert)
 
     revertParser.add_argument('site', metavar='SITE', nargs='?', default=None)
     revertParser.add_argument('rev', metavar='REV', nargs='?', default=None)
 
+
+def create_clean_parser(subparsers):
     cleanParser = subparsers.add_parser('clean', help='remove old deployments')
     cleanParser.set_defaults(action=clean)
 
     cleanParser.add_argument('site', metavar='SITE', help='the site to clean')
 
+
+def create_help_parser(parser, subparsers):
     helpParser = subparsers.add_parser('help', help='show this help message and exit')
     helpParser.add_argument('haction', metavar='ACTION', help='the action to get help for', nargs='?')
     helpParser.set_defaults(action=lambda a:
         (parser if a.haction is None else subparsers.choices[a.haction]).print_help()
     )
 
+
+def create_remove_parser(subparsers):
     removeParser = subparsers.add_parser('remove', help='remove a site')
     removeParser.set_defaults(action=remove)
     removeParser.add_argument('site', metavar='SITE')
 
+
+def create_var_parser(subparsers):
     varParser = subparsers.add_parser('var', help='manage variables')
     varParser.set_defaults(action=var)
     varParser.add_argument('site', metavar='SITE', help='the site to manage the variables of')
     varParser.add_argument('var', metavar='NAME[=VALUE]', help='the value to get or set', nargs='?')
+
+
+def main():
+    parser = create_arg_parser()
 
     global args
     args = parser.parse_args()
@@ -237,7 +291,7 @@ def list(args):
     lengths = {'env': 3, 'name': 4, 'remote': 6, 'default_treeish': max(len('(repo default)'), len('default branch'))}
     for site in sites:
         if not (fnmatch.fnmatch(site['name'], args.site)
-                 and fnmatch.fnmatch(site['remote'], args.remote)):
+                and fnmatch.fnmatch(site['remote'], args.remote)):
             continue
 
         for column in site.keys():
@@ -247,7 +301,7 @@ def list(args):
 
     for site in sites:
         if not (fnmatch.fnmatch(site['name'], args.site)
-                 and fnmatch.fnmatch(site['remote'], args.remote)):
+                and fnmatch.fnmatch(site['remote'], args.remote)):
             continue
 
         print_site_listing(lengths, site)
@@ -345,6 +399,36 @@ def add(args):
 
     db.execute('INSERT INTO site (name, remote, env, default_treeish) VALUES (?, ?, ?, ?)',
                (site_name, remote, env, branch))
+
+    conn.commit()
+    conn.close()
+
+
+def edit(args):
+    site_name = args.site
+
+    conn = open_site_db(args.basedir, site_name)
+    db = conn.cursor()
+
+    site_info = get_site_info(db)
+
+    if args.name:
+        print('\033[31;1mThe site name will be changed to {}. Note that the directory name does not change, ask your '
+              'administrator or move the directory yourself.\033[0m'.format(args.name))
+        site_info.name = args.name
+
+    if args.remote:
+        site_info.remote = args.remote
+
+    if args.branch:
+        site_info.default_treeish = args.branch
+
+    if args.env:
+        site_info.env = args.env
+
+    db.execute('UPDATE site SET name = ?, remote = ?, env = ?, default_treeish = ? WHERE name = ?',
+               (site_info.name, site_info.remote, site_info.env, site_info.default_treeish, site_name)
+    )
 
     conn.commit()
     conn.close()
@@ -534,7 +618,7 @@ def revert(args):
 
         rev_info = db.fetchone()
         if rev_info is None:
-          raise Exception('No available previous deployment to revert to')
+            raise Exception('No available previous deployment to revert to')
 
         rev = rev_info['rev']
 
