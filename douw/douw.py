@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.8
 
 import argparse
 import time
@@ -99,13 +99,14 @@ def populate_add_edit_parser(subparser):
 
 
 def create_deploy_parser(subparsers):
-    deployParser = subparsers.add_parser('deploy', help='deploy one or more sites')
-    deployParser.set_defaults(action=deploy)
+    deploy_parser = subparsers.add_parser('deploy', help='deploy one or more sites')
+    deploy_parser.set_defaults(action=deploy)
 
-    deployParser.add_argument('site', metavar='SITE', help='the site to deploy')
-    deployParser.add_argument('treeish', metavar='TREE-ISH', nargs='?', help='the branch, tag, or commit to deploy')
+    deploy_parser.add_argument('site', metavar='SITE', help='the site to deploy')
+    deploy_parser.add_argument('treeish', metavar='TREE-ISH', nargs='?', help='the branch, tag, or commit to deploy')
 
-    deployParser.add_argument('--revert', action='store_true', help='revert if the revision already exists')
+    deploy_parser.add_argument('--revert', action='store_true', help='revert if the revision already exists')
+    deploy_parser.add_argument('--copy-from', metavar='PATH', help='copy files locally instead of cloning')
 
 
 def create_revert_parser(subparsers):
@@ -472,6 +473,43 @@ def prompt_bool(prompt):
     return vlower == 'y' or vlower == 'yes'
 
 
+def fetch_from_cwd(args, deploy_dir):
+    subprocess.run(['rsync', '-rlp', '--info=progress2', args.copy_from, deploy_dir], check=True)
+    return 'file://{}#{}'.format(os.getcwd(), time.time())
+
+
+def fetch_from_git(args, db, site_info, deploy_dir):
+    subprocess.run(['git', 'clone', site_info.remote, deploy_dir + '/'], check=True)
+    branch = args.treeish or site_info.default_treeish
+    if branch is not None:
+        subprocess.run(['git', '-C', deploy_dir, 'checkout', branch], check=True)
+    result = subprocess.run(['git', 'rev-parse', 'HEAD'],
+                            stdout=subprocess.PIPE, check=True, cwd=deploy_dir)
+    rev_id = result.stdout.decode('utf8').partition("\n")[0]
+
+    db.execute('SELECT 1 FROM deployment WHERE revision = ? AND present = 1;', (rev_id,))
+    existing_deployment = db.fetchone()
+    if existing_deployment is not None and args.force_useless is False and args.force_dangerous is False:
+        print('\033[31;1mThis revision ({}) was already deployed\033[0m'.format(rev_id))
+        shutil.rmtree(deploy_dir)
+        db.connection.close()
+
+        if args.revert:
+            print('\033[33;1mReverting to previous deployment\033[0m')
+            activate(args, site_info.name, rev_id)
+
+        return None
+
+    return rev_id
+
+
+def fetch_files(args, db, site_info, deploy_dir):
+    if args.copy_from is None:
+        return fetch_from_git(args, db, site_info, deploy_dir)
+    else:
+        return fetch_from_cwd(args, deploy_dir)
+
+
 def deploy(args):
     """
     Deploys a site.
@@ -500,28 +538,11 @@ def deploy(args):
 
     os.makedirs(deploy_dir, mode=0o755, exist_ok=True)
 
-    subprocess.run(['git', 'clone', site_info.remote, deploy_dir + '/'], check=True)
-    branch = args.treeish or site_info.default_treeish
-    if branch is not None:
-        subprocess.run(['git', '-C', deploy_dir, 'checkout', branch], check=True)
-    result = subprocess.run(['git', 'rev-parse', 'HEAD'],
-                            stdout=subprocess.PIPE, check=True, cwd=deploy_dir)
-    rev_id = result.stdout.decode('utf8').partition("\n")[0]
-
-    db.execute('SELECT 1 FROM deployment WHERE revision = ? AND present = 1;', (rev_id,))
-    existing_deployment = db.fetchone()
-    if existing_deployment is not None and args.force_useless is False and args.force_dangerous is False:
-        print('\033[31;1mThis revision ({}) was already deployed\033[0m'.format(rev_id))
-        shutil.rmtree(deploy_dir)
-        conn.close()
-
-        if args.revert:
-            print('\033[33;1mReverting to previous deployment\033[0m')
-            activate(args, site_name, rev_id)
-
+    rev_id = fetch_files(args, db, site_info, deploy_dir)
+    if rev_id is None:
         return
 
-    print("\033[32;1mFound revision " + rev_id + ".\033[0m")
+    print('\u001B[32;1mFound revision {}.\u001B[0m'.format(rev_id))
 
     # Execute post-clone
     run_script(db, deploy_dir, site_info.name, site_info.env, rev_id, 'post-clone')
