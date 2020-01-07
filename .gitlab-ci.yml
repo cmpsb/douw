@@ -1,7 +1,18 @@
-image: python:3.7-buster
+image: python:3.8-buster
+
+stages:
+  - test
 
 test:
+  stage: test
   script:
     - pip3 install pytest
     - pip3 install -e .
     - pytest
+
+style:
+  stage: test
+  script:
+    - pip3 install flake8
+    - pip3 install -e .
+    - script/check-style

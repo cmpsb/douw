@@ -1,9 +1,10 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.8
 
 import argparse
 import time
 import datetime
 import os
+import sys
 import subprocess
 import fnmatch
 import shutil
@@ -11,13 +12,14 @@ import shutil
 import sqlite3
 
 from douw.site import Site
+from douw.version import __version__
 
 currentTime = str(time.time())
 
 assume_yes = False
 
 
-def main():
+def create_root_arg_parser():
     parser = argparse.ArgumentParser(
         description='Manage website deployments'
     )
@@ -36,62 +38,127 @@ def main():
     parser.add_argument('--env', '-e', dest='env', metavar='[stage:]key[=value]', nargs='+', action='append',
                         help='define additional environment variables for hook scripts')
 
+    return parser
+
+
+def create_arg_parser():
+    parser = create_root_arg_parser()
+
     subparsers = parser.add_subparsers(title='action', dest='action', metavar='ACTION')
 
-    listParser = subparsers.add_parser('list', help='list all known sites')
-    listParser.set_defaults(action=list)
+    create_list_parser(subparsers)
+    create_deps_parser(subparsers)
+    create_add_parser(subparsers)
+    create_edit_parser(subparsers)
+    create_deploy_parser(subparsers)
+    create_revert_parser(subparsers)
+    create_clean_parser(subparsers)
+    create_help_parser(parser, subparsers)
+    create_remove_parser(subparsers)
+    create_var_parser(subparsers)
+    create_version_parser(subparsers)
 
-    listParser.add_argument('--site', metavar='*', default='*', help='a glob-style pattern to filter site names')
-    listParser.add_argument('--remote', metavar='*', default='*', help='a glob-style pattern to filter remote URLs')
+    return parser
 
-    depsParser = subparsers.add_parser('deployments', help='list all deployments')
-    depsParser.set_defaults(action=deps)
 
-    depsParser.add_argument('site', metavar='SITE', help='the site to get deployments for')
-    depsParser.add_argument('--deleted', action='store_true', help='Also show deleted deployments')
+def create_list_parser(subparsers):
+    list_parser = subparsers.add_parser('list', help='list all known sites')
+    list_parser.set_defaults(action=list)
 
-    addParser = subparsers.add_parser('add', help='add a site',
-                                      description='Missing properties are prompted from standard input.')
-    addParser.set_defaults(action=add)
+    list_parser.add_argument('--site', metavar='*', default='*', help='a glob-style pattern to filter site names')
+    list_parser.add_argument('--remote', metavar='*', default='*', help='a glob-style pattern to filter remote URLs')
 
-    addParser.add_argument('--name', metavar='NAME', help='the name of the site')
-    addParser.add_argument('--remote', metavar='URL', help='the repository to pull changes from')
-    addParser.add_argument('--branch', metavar='TREE-ISH', help='the branch (or tag or commit) to clone by default')
-    addParser.add_argument('--env', metavar='ENV', help='the DTAP environment to deploy as')
 
-    deployParser = subparsers.add_parser('deploy', help='deploy one or more sites')
-    deployParser.set_defaults(action=deploy)
+def create_deps_parser(subparsers):
+    deps_parser = subparsers.add_parser('deployments', help='list all deployments')
+    deps_parser.set_defaults(action=deps)
 
-    deployParser.add_argument('site', metavar='SITE', help='the site to deploy')
-    deployParser.add_argument('treeish', metavar='TREE-ISH', nargs='?', help='the branch, tag, or commit to deploy')
+    deps_parser.add_argument('site', metavar='SITE', help='the site to get deployments for')
+    deps_parser.add_argument('--deleted', action='store_true', help='Also show deleted deployments')
 
-    deployParser.add_argument('--revert', action='store_true', help='revert if the revision already exists')
 
+def create_add_parser(subparsers):
+    add_parser = subparsers.add_parser('add', help='add a site',
+                                       description='Missing properties are prompted from standard input.')
+    add_parser.set_defaults(action=add)
+
+    populate_add_edit_parser(add_parser)
+
+
+def create_edit_parser(subparsers):
+    edit_parser = subparsers.add_parser('edit', help='edit a site', description='modify site properties')
+    edit_parser.set_defaults(action=edit)
+
+    edit_parser.add_argument('site', metavar='SITE', help='the site to edit')
+
+    populate_add_edit_parser(edit_parser)
+
+
+def populate_add_edit_parser(subparser):
+    subparser.add_argument('--name', metavar='NAME', help='the name of the site')
+    subparser.add_argument('--remote', metavar='URL', help='the repository to pull changes from')
+    subparser.add_argument('--branch', metavar='TREE-ISH', help='the branch (or tag or commit) to clone by default')
+    subparser.add_argument('--env', metavar='ENV', help='the DTAP environment to deploy as')
+
+
+def create_deploy_parser(subparsers):
+    deploy_parser = subparsers.add_parser('deploy', help='deploy one or more sites')
+    deploy_parser.set_defaults(action=deploy)
+
+    deploy_parser.add_argument('site', metavar='SITE', help='the site to deploy')
+    deploy_parser.add_argument('treeish', metavar='TREE-ISH', nargs='?', help='the branch, tag, or commit to deploy')
+
+    deploy_parser.add_argument('--revert', action='store_true', help='revert if the revision already exists')
+    deploy_parser.add_argument('--copy-from', metavar='PATH', help='copy files locally instead of cloning')
+
+
+def create_revert_parser(subparsers):
     revertParser = subparsers.add_parser('revert', help='revert to a previous revision')
     revertParser.set_defaults(action=revert)
 
     revertParser.add_argument('site', metavar='SITE', nargs='?', default=None)
     revertParser.add_argument('rev', metavar='REV', nargs='?', default=None)
 
+
+def create_clean_parser(subparsers):
     cleanParser = subparsers.add_parser('clean', help='remove old deployments')
     cleanParser.set_defaults(action=clean)
 
     cleanParser.add_argument('site', metavar='SITE', help='the site to clean')
 
+
+def create_help_parser(parser, subparsers):
     helpParser = subparsers.add_parser('help', help='show this help message and exit')
     helpParser.add_argument('haction', metavar='ACTION', help='the action to get help for', nargs='?')
     helpParser.set_defaults(action=lambda a:
         (parser if a.haction is None else subparsers.choices[a.haction]).print_help()
     )
 
+
+def create_remove_parser(subparsers):
     removeParser = subparsers.add_parser('remove', help='remove a site')
     removeParser.set_defaults(action=remove)
     removeParser.add_argument('site', metavar='SITE')
 
+
+def create_var_parser(subparsers):
     varParser = subparsers.add_parser('var', help='manage variables')
     varParser.set_defaults(action=var)
     varParser.add_argument('site', metavar='SITE', help='the site to manage the variables of')
     varParser.add_argument('var', metavar='NAME[=VALUE]', help='the value to get or set', nargs='?')
+
+
+def create_version_parser(subparsers):
+    version_parser = subparsers.add_parser('version', help='display version information')
+    version_parser.set_defaults(action=version)
+
+    version_parser.add_argument('--full', action='store_true', help='also list dependency versions')
+    version_parser.add_argument('--no-copyright', action='store_true',
+                                help='do not print narcissistic copyright information')
+
+
+def main():
+    parser = create_arg_parser()
 
     global args
     args = parser.parse_args()
@@ -236,8 +303,7 @@ def list(args):
     # For each column, find the longest string.
     lengths = {'env': 3, 'name': 4, 'remote': 6, 'default_treeish': max(len('(repo default)'), len('default branch'))}
     for site in sites:
-        if not (fnmatch.fnmatch(site['name'], args.site)
-                 and fnmatch.fnmatch(site['remote'], args.remote)):
+        if not (fnmatch.fnmatch(site['name'], args.site) and fnmatch.fnmatch(site['remote'], args.remote)):
             continue
 
         for column in site.keys():
@@ -246,8 +312,7 @@ def list(args):
     print_site_listing(lengths, {'env': 'env', 'name': 'site', 'remote': 'remote', 'default_treeish': 'default branch'})
 
     for site in sites:
-        if not (fnmatch.fnmatch(site['name'], args.site)
-                 and fnmatch.fnmatch(site['remote'], args.remote)):
+        if not (fnmatch.fnmatch(site['name'], args.site) and fnmatch.fnmatch(site['remote'], args.remote)):
             continue
 
         print_site_listing(lengths, site)
@@ -272,7 +337,7 @@ def deps(args):
 
     db.execute("""
         SELECT deployment.path, deployment.date, deployment.active, deployment.revision, deployment.present
-          FROM deployment 
+          FROM deployment
           ORDER BY date;
     """)
 
@@ -350,6 +415,36 @@ def add(args):
     conn.close()
 
 
+def edit(args):
+    site_name = args.site
+
+    conn = open_site_db(args.basedir, site_name)
+    db = conn.cursor()
+
+    site_info = get_site_info(db)
+
+    if args.name:
+        print('\033[31;1mThe site name will be changed to {}. Note that the directory name does not change, ask your '
+              'administrator or move the directory yourself.\033[0m'.format(args.name))
+        site_info.name = args.name
+
+    if args.remote:
+        site_info.remote = args.remote
+
+    if args.branch:
+        site_info.default_treeish = args.branch
+
+    if args.env:
+        site_info.env = args.env
+
+    db.execute('UPDATE site SET name = ?, remote = ?, env = ?, default_treeish = ? WHERE name = ?',
+               (site_info.name, site_info.remote, site_info.env, site_info.default_treeish, site_name)
+    )
+
+    conn.commit()
+    conn.close()
+
+
 def prompt_default(prompt, default):
     global assume_yes
     if assume_yes:
@@ -388,6 +483,43 @@ def prompt_bool(prompt):
     return vlower == 'y' or vlower == 'yes'
 
 
+def fetch_from_cwd(args, deploy_dir):
+    subprocess.run(['rsync', '-rlp', '--info=progress2', args.copy_from, deploy_dir], check=True)
+    return 'file://{}#{}'.format(os.getcwd(), time.time())
+
+
+def fetch_from_git(args, db, site_info, deploy_dir):
+    subprocess.run(['git', 'clone', site_info.remote, deploy_dir + '/'], check=True)
+    branch = args.treeish or site_info.default_treeish
+    if branch is not None:
+        subprocess.run(['git', '-C', deploy_dir, 'checkout', branch], check=True)
+    result = subprocess.run(['git', 'rev-parse', 'HEAD'],
+                            stdout=subprocess.PIPE, check=True, cwd=deploy_dir)
+    rev_id = result.stdout.decode('utf8').partition("\n")[0]
+
+    db.execute('SELECT 1 FROM deployment WHERE revision = ? AND present = 1;', (rev_id,))
+    existing_deployment = db.fetchone()
+    if existing_deployment is not None and args.force_useless is False and args.force_dangerous is False:
+        print('\033[31;1mThis revision ({}) was already deployed\033[0m'.format(rev_id))
+        shutil.rmtree(deploy_dir)
+        db.connection.close()
+
+        if args.revert:
+            print('\033[33;1mReverting to previous deployment\033[0m')
+            activate(args, site_info.name, rev_id)
+
+        return None
+
+    return rev_id
+
+
+def fetch_files(args, db, site_info, deploy_dir):
+    if args.copy_from is None:
+        return fetch_from_git(args, db, site_info, deploy_dir)
+    else:
+        return fetch_from_cwd(args, deploy_dir)
+
+
 def deploy(args):
     """
     Deploys a site.
@@ -416,28 +548,11 @@ def deploy(args):
 
     os.makedirs(deploy_dir, mode=0o755, exist_ok=True)
 
-    subprocess.run(['git', 'clone', site_info.remote, deploy_dir + '/'], check=True)
-    branch = args.treeish or site_info.default_treeish
-    if branch is not None:
-        subprocess.run(['git', '-C', deploy_dir, 'checkout', branch], check=True)
-    result = subprocess.run(['git', 'rev-parse', 'HEAD'],
-                            stdout=subprocess.PIPE, check=True, cwd=deploy_dir)
-    rev_id = result.stdout.decode('utf8').partition("\n")[0]
-
-    db.execute('SELECT 1 FROM deployment WHERE revision = ? AND present = 1;', (rev_id,))
-    existing_deployment = db.fetchone()
-    if existing_deployment is not None and args.force_useless is False and args.force_dangerous is False:
-        print('\033[31;1mThis revision ({}) was already deployed\033[0m'.format(rev_id))
-        shutil.rmtree(deploy_dir)
-        conn.close()
-
-        if args.revert:
-            print('\033[33;1mReverting to previous deployment\033[0m')
-            activate(args, site_name, rev_id)
-
+    rev_id = fetch_files(args, db, site_info, deploy_dir)
+    if rev_id is None:
         return
 
-    print("\033[32;1mFound revision " + rev_id + ".\033[0m")
+    print('\u001B[32;1mFound revision {}.\u001B[0m'.format(rev_id))
 
     # Execute post-clone
     run_script(db, deploy_dir, site_info.name, site_info.env, rev_id, 'post-clone')
@@ -509,8 +624,8 @@ def activate(args, site_info, revision):
     # Register the new deployment
     db.execute('UPDATE deployment SET active = 0;')
     db.execute("""
-        UPDATE deployment 
-          SET active = 1 
+        UPDATE deployment
+          SET active = 1
           WHERE rowid = (SELECT rowid FROM deployment WHERE revision = ? ORDER BY date DESC LIMIT 1);
     """, (revision,))
 
@@ -534,7 +649,7 @@ def revert(args):
 
         rev_info = db.fetchone()
         if rev_info is None:
-          raise Exception('No available previous deployment to revert to')
+            raise Exception('No available previous deployment to revert to')
 
         rev = rev_info['rev']
 
@@ -555,9 +670,9 @@ def clean(args):
     db.connection.commit()
     db.execute("""
         SELECT deployment.id, deployment.path, deployment.revision
-          FROM deployment 
-          WHERE deployment.active <> 1 
-            AND deployment.present = 1 
+          FROM deployment
+          WHERE deployment.active <> 1
+            AND deployment.present = 1
           ORDER BY deployment.date DESC
           LIMIT 1000000 OFFSET 4;
     """)
@@ -571,7 +686,7 @@ def clean(args):
 
         try:
             shutil.rmtree(result['path'])
-        except:
+        except Exception:
             pass
 
         db.execute('UPDATE deployment SET present = 0 WHERE id = ?', (result['id'],))
@@ -679,3 +794,14 @@ def get_var(db, name):
     var = db.fetchone()
 
     print(name, '=', var['value'], sep='')
+
+
+def version(args):
+    print('Douw {}'.format(__version__))
+
+    if args.full:
+        print('Python {}'.format(sys.version))
+
+    if not args.no_copyright:
+        print('Copyright © 2016–⁠2020 Luc Everse')
+        print('https://git.wukl.net/wukl/douw')
