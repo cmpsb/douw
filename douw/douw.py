@@ -4,6 +4,7 @@ import argparse
 import time
 import datetime
 import os
+import sys
 import subprocess
 import fnmatch
 import shutil
@@ -11,6 +12,7 @@ import shutil
 import sqlite3
 
 from douw.site import Site
+from douw.version import __version__
 
 currentTime = str(time.time())
 
@@ -54,6 +56,7 @@ def create_arg_parser():
     create_help_parser(parser, subparsers)
     create_remove_parser(subparsers)
     create_var_parser(subparsers)
+    create_version_parser(subparsers)
 
     return parser
 
@@ -143,6 +146,15 @@ def create_var_parser(subparsers):
     varParser.set_defaults(action=var)
     varParser.add_argument('site', metavar='SITE', help='the site to manage the variables of')
     varParser.add_argument('var', metavar='NAME[=VALUE]', help='the value to get or set', nargs='?')
+
+
+def create_version_parser(subparsers):
+    version_parser = subparsers.add_parser('version', help='display version information')
+    version_parser.set_defaults(action=version)
+
+    version_parser.add_argument('--full', action='store_true', help='also list dependency versions')
+    version_parser.add_argument('--no-copyright', action='store_true',
+                                help='do not print narcissistic copyright information')
 
 
 def main():
@@ -782,3 +794,14 @@ def get_var(db, name):
     var = db.fetchone()
 
     print(name, '=', var['value'], sep='')
+
+
+def version(args):
+    print('Douw {}'.format(__version__))
+
+    if args.full:
+        print('Python {}'.format(sys.version))
+
+    if not args.no_copyright:
+        print('Copyright © 2016–⁠2020 Luc Everse')
+        print('https://git.wukl.net/wukl/douw')

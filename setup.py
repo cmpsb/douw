@@ -1,5 +1,10 @@
 # -*- coding: utf-8 -*-
+import os
 from setuptools import setup, find_packages
+
+ver_globals = {}
+with open(os.path.join('douw', 'version.py'), 'rt') as version_file:
+    exec(version_file.read(), ver_globals)
 
 try:
     long_description = open("README.rst.rst").read()
@@ -8,7 +13,7 @@ except IOError:
 
 setup(
     name="douw",
-    version="0.3.0",
+    version=ver_globals['__version__'],
     description="Drop-in website deployment",
     url='https://git.wukl.net/wukl/douw',
     license="MIT",
