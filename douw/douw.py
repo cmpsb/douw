@@ -291,8 +291,7 @@ def list(args):
     # For each column, find the longest string.
     lengths = {'env': 3, 'name': 4, 'remote': 6, 'default_treeish': max(len('(repo default)'), len('default branch'))}
     for site in sites:
-        if not (fnmatch.fnmatch(site['name'], args.site)
-                and fnmatch.fnmatch(site['remote'], args.remote)):
+        if not (fnmatch.fnmatch(site['name'], args.site) and fnmatch.fnmatch(site['remote'], args.remote)):
             continue
 
         for column in site.keys():
@@ -301,8 +300,7 @@ def list(args):
     print_site_listing(lengths, {'env': 'env', 'name': 'site', 'remote': 'remote', 'default_treeish': 'default branch'})
 
     for site in sites:
-        if not (fnmatch.fnmatch(site['name'], args.site)
-                and fnmatch.fnmatch(site['remote'], args.remote)):
+        if not (fnmatch.fnmatch(site['name'], args.site) and fnmatch.fnmatch(site['remote'], args.remote)):
             continue
 
         print_site_listing(lengths, site)
@@ -327,7 +325,7 @@ def deps(args):
 
     db.execute("""
         SELECT deployment.path, deployment.date, deployment.active, deployment.revision, deployment.present
-          FROM deployment 
+          FROM deployment
           ORDER BY date;
     """)
 
@@ -614,8 +612,8 @@ def activate(args, site_info, revision):
     # Register the new deployment
     db.execute('UPDATE deployment SET active = 0;')
     db.execute("""
-        UPDATE deployment 
-          SET active = 1 
+        UPDATE deployment
+          SET active = 1
           WHERE rowid = (SELECT rowid FROM deployment WHERE revision = ? ORDER BY date DESC LIMIT 1);
     """, (revision,))
 
@@ -660,9 +658,9 @@ def clean(args):
     db.connection.commit()
     db.execute("""
         SELECT deployment.id, deployment.path, deployment.revision
-          FROM deployment 
-          WHERE deployment.active <> 1 
-            AND deployment.present = 1 
+          FROM deployment
+          WHERE deployment.active <> 1
+            AND deployment.present = 1
           ORDER BY deployment.date DESC
           LIMIT 1000000 OFFSET 4;
     """)
@@ -676,7 +674,7 @@ def clean(args):
 
         try:
             shutil.rmtree(result['path'])
-        except:
+        except Exception:
             pass
 
         db.execute('UPDATE deployment SET present = 0 WHERE id = ?', (result['id'],))

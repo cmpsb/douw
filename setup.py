@@ -18,7 +18,7 @@ setup(
     install_requires=[],
     tests_require=[
         'pytest',
-        'pytest-pep8'
+        'pycodestyle'
     ],
     python_requires='>=3.8',
     long_description=long_description,
