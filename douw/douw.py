@@ -729,7 +729,8 @@ def extract_env_args(stage):
 
         try:
             kstage, key = key.split(':', maxsplit=1)
-            if kstage != stage: continue
+            if kstage != stage:
+                continue
         except ValueError:
             pass
 
