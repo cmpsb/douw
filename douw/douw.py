@@ -35,7 +35,8 @@ def create_root_arg_parser():
 
     parser.add_argument('--no-inherit-env', dest='inherit_env', action='store_false',
                         help='do not forward environment variables to hook scripts')
-    parser.add_argument('--env', '-e', dest='env', metavar='[stage:]key[=value]', nargs='+', action='append',
+    parser.add_argument('--env', '-e', dest='env_args', metavar='[stage:]key[=value]',
+                        action='append',
                         help='define additional environment variables for hook scripts')
 
     return parser
@@ -718,6 +719,25 @@ def remove(args):
     shutil.rmtree(site_dir)
 
 
+def extract_env_args(stage):
+    global args
+
+    env = {}
+
+    for arg in args.env_args:
+        key, value = (arg.split('=', maxsplit=1) + [None])[:2]
+
+        try:
+            kstage, key = key.split(':', maxsplit=1)
+            if kstage != stage: continue
+        except ValueError:
+            pass
+
+        env[key] = value
+
+    return env
+
+
 def run_script(db, deployment_path, site_name, environment, commit, stage):
     if deployment_path is None:
         return
@@ -729,13 +749,14 @@ def run_script(db, deployment_path, site_name, environment, commit, stage):
     global args
 
     env = dict(os.environ) if args.inherit_env else {}
-    env.update([(var['name'], var['value']) for var in get_vars(db)])
     env.update({
         'DOUW_SITE_NAME': site_name,
         'DOUW_ENVIRONMENT': environment,
         'DOUW_REVISION': commit,
         'DOUW_STAGE': stage
     })
+    env.update([(var['name'], var['value']) for var in get_vars(db)])
+    env.update(extract_env_args(stage))
 
     subprocess.run([script_path], env=env, cwd=deployment_path, check=True)
 
